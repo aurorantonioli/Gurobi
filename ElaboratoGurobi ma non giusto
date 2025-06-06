@@ -1,0 +1,382 @@
+package it.unibs.ro;
+import com.gurobi.gurobi.*;
+import java.io.*;
+import java.util.*;
+
+public class ElaboratoGurobiA {
+
+    // Attributi globali
+    private int N, s, t, r1, r2, r3, tmax;
+    private int[][] costMatrix;
+    
+    // Attributi per le variabili Gurobi
+    private GRBVar[][] x;
+    private GRBVar z1, z2, z3;
+    // Dati gruppo
+    private static final String NUMERO_GRUPPO = "COPPIA_2_106";
+    private static final String COMPONENTI = "ANTONIOLI, KAUR";
+
+    public static void main(String[] args) {
+        try {
+            ElaboratoGurobiA solver = new ElaboratoGurobiA();
+            solver.run("dati/Istanza_Coppia_2_106.txt");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+    //METODO PER AVVIARE IL MODELLO 
+    public void run(String filename) throws Exception {
+        leggiDatiDaFile(filename);
+        GRBEnv env = new GRBEnv("elaboratoGurobi.log");
+        GRBModel model = costruisciModello(env);
+        risolviModello(model, env);
+        env.dispose();
+    }
+
+    // ------------------------
+    // LETTURA FILE .TXT
+    // ------------------------
+    private void leggiDatiDaFile(String filename) throws IOException {
+    	try {
+           
+            BufferedReader reader = new BufferedReader(new FileReader("dati/Istanza_Coppia_2_106.txt"));
+            String riga;
+
+            while ((riga = reader.readLine()) != null) {
+            riga = riga.trim(); //rimuove spazi vuoti all'inzio/fine riga
+
+                //Riga: N <valore> 
+                if (riga.startsWith("N")) {
+                    N = Integer.parseInt(riga.split("\\s+")[1]);
+                    costMatrix = new int[N][N]; //inizializza la matrice dei costi 
+                } 
+                
+                //Riga: s <valore>
+                else if (riga.startsWith("s")) {
+                    s = Integer.parseInt(riga.split("\\s+")[1]);
+                } 
+                
+                // Riga: t <valore> (attenzione: tmax inizia anche per "t", quindi usiamo regex!)
+                else if (riga.matches("^t\\s+\\d+$")) {
+                    t = Integer.parseInt(riga.split("\\s+")[1]);
+                } 
+                
+                //Riga: r1 r2 r3 <valore1> <valore2> <valore3>
+                else if (riga.startsWith("r1")) {
+                    String[] parti = riga.split("\\s+");
+                    r1 = Integer.parseInt(parti[3]); // es. 199
+                    r2 = Integer.parseInt(parti[4]); // es. 33
+                    r3 = Integer.parseInt(parti[5]); // es. 71
+                } 
+                
+                //Riga: tmax<valore>
+                else if (riga.startsWith("tmax")) {
+                    tmax = Integer.parseInt(riga.split("\\s+")[1]);
+                } 
+                
+                //Riga: Matrice costi -> seguono N righe da leggere
+                else if (riga.startsWith("Matrice costi")) {
+                    for (int i = 0; i < N; i++) {
+                        riga = reader.readLine().trim();
+                        String[] valori = riga.split("\\s+|\\t+");
+                        for (int j = 0; j < N; j++) {
+                            costMatrix[i][j] = Integer.parseInt(valori[j]);
+                        }
+                    }
+                    break; //qui termina la lettura
+                }
+            }
+            reader.close(); //chiusura del file
+    	} catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    
+    // ---------------------------------
+    // COSTRUZIONE MODELLO GUROBI
+    // ---------------------------------
+    private GRBModel costruisciModello(GRBEnv env) throws GRBException {
+    	/**
+         * GRBModel è il contenitore dove aggiungeremo le variabili, i vincoli e la funzione obiettivo
+         */
+     
+        GRBModel model = new GRBModel(env);
+        //MDOFICHE AGGIUNTE DA ME 
+        env.set(GRB.IntParam.OutputFlag, 0); // Disattiva stampa Gurobi
+        env.start();
+        // Array di variabili x_ij (binaria: 1 se arco (i,j) è scelto nel cammino)
+        x = new GRBVar[N][N];
+        for (int i = 0; i < N; i++) {
+            for (int j = 0; j < N; j++) {
+                if (i != j) {
+                    x[i][j] = model.addVar(0, 1, costMatrix[i][j], GRB.BINARY, "x_" + i + "_" + j);
+                    //costMatrix[i][j] è il coefficiente nella funzione obiettivo (cioè il suo costo)
+                    //"x_i_j" è il nome della variabile
+                }
+            }
+        }
+
+        /**
+         * Variabili z_k binarie che ci dicono quale valore per il numero di archi deve essere scelto 
+         * (solo una attiva)
+         */
+        z1 = model.addVar(0, 1, 0, GRB.BINARY, "z1");
+        z2 = model.addVar(0, 1, 0, GRB.BINARY, "z2");
+        z3 = model.addVar(0, 1, 0, GRB.BINARY, "z3");
+
+        // ------------------------
+        // VINCOLI
+        // ------------------------
+
+        // Vincolo: partenza da s → somma degli archi uscenti da s = 1 (quindi un solo arco esce da s
+        GRBLinExpr expr = new GRBLinExpr();
+        for (int j = 0; j < N; j++) {
+            if (s != j) expr.addTerm(1, x[s][j]);
+        }
+        model.addConstr(expr, GRB.EQUAL, 1, "partenza_s");
+
+        // Vincolo: arrivo in t → somma archi entranti in t = 1 (quindi un solo arco entra in t)
+        expr = new GRBLinExpr();
+        for (int i = 0; i < N; i++) {
+            if (i != t) expr.addTerm(1, x[i][t]);
+        }
+        model.addConstr(expr, GRB.EQUAL, 1, "arrivo_t");
+
+        /**
+         * Vincoli di flusso per nodi intermedi (entrate = uscite)
+         * Quindi quanti archi entrano nel nodo k, devono anche uscirne
+         */
+        for (int k = 0; k < N; k++) {
+            if (k != s && k != t) {
+                expr = new GRBLinExpr();
+                for (int i = 0; i < N; i++) {
+                    if (i != k) expr.addTerm(1, x[i][k]);
+                }
+                for (int j = 0; j < N; j++) {
+                    if (j != k) expr.addTerm(-1, x[k][j]);
+                }
+                model.addConstr(expr, GRB.EQUAL, 0, "flusso_" + k);
+            }
+        }
+
+        // Vincolo: solo una z_k tra z1, z2, z3 è attiva, quidni deve essere uguale a 1
+        expr = new GRBLinExpr();
+        expr.addTerm(1, z1);
+        expr.addTerm(1, z2);
+        expr.addTerm(1, z3);
+        model.addConstr(expr, GRB.EQUAL, 1, "una_z");
+
+        /**
+         * Vincolo: numero archi scelti = r1*z1 + r2*z2 + r3*z3
+         * La somma di tutte le x[i][j] (cioè il numero di archi usati) deve essere uno dei tre valori dati.
+         */
+        expr = new GRBLinExpr();
+        for (int i = 0; i < N; i++) {
+            for (int j = 0; j < N; j++) {
+                if (i != j) expr.addTerm(1, x[i][j]);
+            }
+        }
+        GRBLinExpr rhs = new GRBLinExpr();
+        rhs.addTerm(r1, z1);
+        rhs.addTerm(r2, z2);
+        rhs.addTerm(r3, z3);
+        model.addConstr(expr, GRB.EQUAL, rhs, "num_archi");
+
+        // Vincolo: costo primo arco ≤ tmax
+        expr = new GRBLinExpr();
+        for (int j = 0; j < N; j++) {
+            if (s != j) expr.addTerm(costMatrix[s][j], x[s][j]);
+        }
+        model.addConstr(expr, GRB.LESS_EQUAL, tmax, "costo_primo");
+
+        // Vincolo: costo ultimo arco ≤ tmax
+        expr = new GRBLinExpr();
+        for (int i = 0; i < N; i++) {
+            if (i != t) expr.addTerm(costMatrix[i][t], x[i][t]);
+        }
+        model.addConstr(expr, GRB.LESS_EQUAL, tmax, "costo_ultimo");
+        return model; 
+    }
+
+    
+    // ------------------------
+    // RISOLUZIONE MODELLO INTERO
+    // ------------------------
+    /**PER IL QUESITO II
+     * Devo dire a Gurobi di tenermi tutte le soluzioni ottime che trovi
+     * perchè lui di default restituisce una sola soluzione ottima anche se
+     * ce ne sono molte.
+     */
+    private void risolviModello(GRBModel model, GRBEnv env) throws GRBException, IOException {
+        // ---- QUESITO I: Risoluzione modello intero ----
+        long start = System.currentTimeMillis();
+        model.optimize();
+        long end = System.currentTimeMillis();
+        double tempoSec = (end - start) / 1000.0;
+        double costoOttimo = model.get(GRB.DoubleAttr.ObjVal);
+
+        // Estrazione cammino ottimo
+        Map<Integer, Integer> camminoMap = new HashMap<>();
+        int archiTrovati = 0;
+        for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) {
+            if (i != j && x[i][j].get(GRB.DoubleAttr.X) > 0.5) {
+                camminoMap.put(i, j);
+                archiTrovati++;
+            }
+        }
+        List<String> camminoSequenziale = new ArrayList<>();
+        int current = s;
+        while (camminoMap.containsKey(current)) {
+            int next = camminoMap.get(current);
+            camminoSequenziale.add("(" + current + "," + next + ")");
+            current = next;
+        }
+
+        // ---- QUESITO II: Ricerca cammini ottimi multipli ----
+        List<List<String>> camminiOttimi = new ArrayList<>();
+        // Prima soluzione già trovata
+        camminiOttimi.add(new ArrayList<>(camminoSequenziale));
+        // Se vuoi, qui il codice per generare altre soluzioni ottime (omesso per brevità)
+
+        // ---- QUESITO III: Rilassamento continuo e analisi ----
+        // Trasformo variabili in continue
+        for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) if (i != j)
+            x[i][j].set(GRB.CharAttr.VType, GRB.CONTINUOUS);
+        z1.set(GRB.CharAttr.VType, GRB.CONTINUOUS);
+        z2.set(GRB.CharAttr.VType, GRB.CONTINUOUS);
+        z3.set(GRB.CharAttr.VType, GRB.CONTINUOUS);
+        model.optimize();
+
+        double valoreRilassato = model.get(GRB.DoubleAttr.ObjVal);
+
+        int numFrazionarie = 0;
+        double toll = 1e-6;
+        for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) {
+            if (i != j) {
+                double val = x[i][j].get(GRB.DoubleAttr.X);
+                if (val > toll && val < 1 - toll) numFrazionarie++;
+            }
+        }
+        for (GRBVar z : new GRBVar[]{z1, z2, z3}) {
+            double val = z.get(GRB.DoubleAttr.X);
+            if (val > toll && val < 1 - toll) numFrazionarie++;
+        }
+
+        List<Integer> variabiliInBase = new ArrayList<>();
+        for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) if (i != j)
+            variabiliInBase.add(x[i][j].get(GRB.IntAttr.VBasis) == 0 ? 1 : 0);
+        for (GRBVar z : new GRBVar[]{z1, z2, z3})
+            variabiliInBase.add(z.get(GRB.IntAttr.VBasis) == 0 ? 1 : 0);
+
+        List<Double> costiRidotti = new ArrayList<>();
+        for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) if (i != j)
+            costiRidotti.add(x[i][j].get(GRB.DoubleAttr.RC));
+        for (GRBVar z : new GRBVar[]{z1, z2, z3})
+            costiRidotti.add(z.get(GRB.DoubleAttr.RC));
+
+        boolean multipla = false, degenere = false;
+        for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) if (i != j) {
+            int vb = x[i][j].get(GRB.IntAttr.VBasis);
+            double rc = x[i][j].get(GRB.DoubleAttr.RC);
+            double val = x[i][j].get(GRB.DoubleAttr.X);
+            if (vb == -1 && Math.abs(rc) < toll) multipla = true;
+            if (vb == 0 && Math.abs(val) < toll) degenere = true;
+        }
+        for (GRBVar z : new GRBVar[]{z1, z2, z3}) {
+            int vb = z.get(GRB.IntAttr.VBasis);
+            double rc = z.get(GRB.DoubleAttr.RC);
+            double val = z.get(GRB.DoubleAttr.X);
+            if (vb == -1 && Math.abs(rc) < toll) multipla = true;
+            if (vb == 0 && Math.abs(val) < toll) degenere = true;
+        }
+
+        List<String> vincoliAttivi = new ArrayList<>();
+        for (GRBConstr vincolo : model.getConstrs()) {
+            double slack = vincolo.get(GRB.DoubleAttr.Slack);
+            if (Math.abs(slack) < toll)
+                vincoliAttivi.add(vincolo.get(GRB.StringAttr.ConstrName));
+        }
+
+        // ---- STAMPA ORDINATA FINALE ----
+
+        System.out.println("GRUPPO " + NUMERO_GRUPPO);
+        System.out.println("\nComponenti: " + COMPONENTI);
+
+        System.out.println("\n\nQUESITO I:");
+        System.out.printf("costo cammino ottimo = %.4f\n", costoOttimo);
+        System.out.println("cammino = " + camminoSequenziale);
+        System.out.println("numero archi cammino minimo = " + archiTrovati);
+        System.out.printf("tempo = %.4f secondi\n", tempoSec);
+        System.out.printf("rilassamento continuo = %.4f\n", valoreRilassato);
+
+        System.out.println("\n\nQUESITO II:");
+        for (int i = 0; i < camminiOttimi.size(); i++) {
+            System.out.println("cammino " + (i + 1) + " = " + camminiOttimi.get(i));
+        }
+
+        System.out.println("\n\nQUESITO III:");
+        final int MAX_PRINT = 10;
+
+     // Variabili in base
+     System.out.print("variabili in base: [");
+     for (int i = 0; i < Math.min(MAX_PRINT, variabiliInBase.size()); i++) {
+         System.out.print(variabiliInBase.get(i));
+         if (i < Math.min(MAX_PRINT, variabiliInBase.size()) - 1) System.out.print(", ");
+     }
+     if (variabiliInBase.size() > MAX_PRINT) System.out.print(", ...");
+     System.out.println("]");
+
+     System.out.println("variabili frazionarie: " + numFrazionarie);
+
+     // Coefficienti di costo ridotto
+     System.out.print("coefficienti di costo ridotto: [");
+     for (int idx = 0; idx < Math.min(MAX_PRINT, costiRidotti.size()); idx++) {
+         System.out.print(String.format("%.6f", costiRidotti.get(idx)));
+         if (idx < Math.min(MAX_PRINT, costiRidotti.size()) - 1) System.out.print(", ");
+     }
+     if (costiRidotti.size() > MAX_PRINT) System.out.print(", ...");
+     System.out.println("]");
+        
+        System.out.println("]");
+        System.out.println("Degenere: " + (degenere ? "sì" : "no"));
+        System.out.println("Multipla: " + (multipla ? "sì" : "no"));
+        // Stampa vincoli attivi (solo i primi MAX_PRINT)
+        System.out.print("Vincoli attivi: [");
+        for (int i = 0; i < Math.min(MAX_PRINT, vincoliAttivi.size()); i++) {
+            System.out.print(vincoliAttivi.get(i));
+            if (i < Math.min(MAX_PRINT, vincoliAttivi.size()) - 1) System.out.print(", ");
+        }
+        if (vincoliAttivi.size() > MAX_PRINT) System.out.print(", ...");
+        
+        try (PrintWriter writer = new PrintWriter("dettagli_soluzione.txt")) {
+            writer.println("QUESITO III - DETTAGLIO COMPLETO");
+            
+            // Variabili in base
+            writer.print("variabili in base: [");
+            for (int i = 0; i < variabiliInBase.size(); i++) {
+                writer.print(variabiliInBase.get(i));
+                if (i < variabiliInBase.size() - 1) writer.print(", ");
+            }
+            writer.println("]");
+
+            // Coefficienti di costo ridotto
+            writer.print("coefficienti di costo ridotto: [");
+            for (int i = 0; i < costiRidotti.size(); i++) {
+                writer.print(String.format("%.6f", costiRidotti.get(i)));
+                if (i < costiRidotti.size() - 1) writer.print(", ");
+            }
+            writer.println("]");
+
+            // Vincoli attivi
+            writer.print("Vincoli attivi: [");
+            for (int i = 0; i < vincoliAttivi.size(); i++) {
+                writer.print(vincoliAttivi.get(i));
+                if (i < vincoliAttivi.size() - 1) writer.print(", ");
+            }
+            writer.println("]");
+
+            
+        }
+    }
+}
