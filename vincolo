@@ -1,0 +1,17 @@
+// VINCOLO: costo primo arco + costo ultimo arco ≤ tmax
+        GRBLinExpr primoUltimoArcoCosto = new GRBLinExpr();
+ 
+        // Somma costo arco uscente da s (primo arco)
+        for (int j = 0; j < N; j++) {
+            if (j != s) {
+                primoUltimoArcoCosto.addTerm(costMatrix[s][j], x[s][j]);
+            }
+        }
+        // Somma costo arco entrante in t (ultimo arco)
+        for (int i = 0; i < N; i++) {
+            if (i != t) {
+                primoUltimoArcoCosto.addTerm(costMatrix[i][t], x[i][t]);
+            }
+        }
+        model.addConstr(primoUltimoArcoCosto, GRB.LESS_EQUAL, tmax, "vincolo_primo_ultimo_arco");
+        
